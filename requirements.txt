@@ -1,0 +1,9 @@
+torch
+torchvision
+fastapi
+uvicorn
+pillow
+numpy
+opencv-python-headless
+scikit-image
+jinja2

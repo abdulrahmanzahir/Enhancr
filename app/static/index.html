@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<link rel='stylesheet' href='/static/style.css'><title>Enhancr</title></head>
+<body><div class='card'><h1>Enhancr</h1>
+<p>Upload an image, get an enhanced PNG.</p>
+<input id='file' type='file' accept='image/*'/><button id='btn'>Enhance</button>
+<a id='dl' style='display:none;'>Download PNG</a><div id='status'></div></div>
+<script>
+const btn=document.getElementById('btn');
+btn.onclick=async()=>{
+  const f=document.getElementById('file').files[0]; if(!f){alert('Choose an image');return;}
+  const fd=new FormData(); fd.append('file',f);
+  document.getElementById('status').textContent='Processing...';
+  const res=await fetch('/enhance',{method:'POST',body:fd});
+  const blob=await res.blob(); const url=URL.createObjectURL(blob);
+  const a=document.getElementById('dl'); a.href=url; a.download='enhanced.png';
+  a.style.display='inline-block'; a.textContent='Download PNG';
+  document.getElementById('status').textContent='Done.';
+};
+</script></body></html>
