@@ -1,0 +1,3 @@
+HR source images: 201
+Total pairs: 603
+Variants per HR: 3

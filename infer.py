@@ -4,7 +4,7 @@ import numpy as np
 from models.srcnn import SRCNN
 
 @torch.no_grad()
-def enhance_image(input_path, output_path, ckpt='weights/srcnn.pth'):
+def enhance_image(input_path, output_path, ckpt='weights/srcnn_best.pth'):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     net = SRCNN().to(device)
     net.load_state_dict(torch.load(ckpt, map_location=device)['state_dict'])
