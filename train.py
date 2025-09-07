@@ -4,7 +4,15 @@ import torch, torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from PIL import Image
 import numpy as np
-from models.srcnn import SRCNN
+from tqdm import tqdm
+
+# ==== NEW (active) ====
+from models.edsr_lite import EDSRLite
+from losses.perceptual import VGGPerceptual
+
+# ==== OLD (kept for reference; now inactive) ====
+# from models.srcnn import SRCNN
+
 
 # --------------------
 # Dataset
@@ -30,6 +38,7 @@ class PairDataset(Dataset):
         hr = torch.from_numpy(hr).permute(2,0,1).float()/255.
         return lr, hr
 
+
 # --------------------
 # Metrics
 # --------------------
@@ -37,6 +46,7 @@ def psnr(pred, target):
     mse = torch.mean((pred - target) ** 2).item()
     if mse == 0: return 99.0
     return 10 * math.log10(1.0 / mse)
+
 
 # --------------------
 # Train / Val loop
@@ -46,10 +56,18 @@ def train(
     epochs=20,
     batch_size=8,
     lr=2e-4,
-    ckpt_best='weights/srcnn_best.pth',
-    ckpt_last='weights/srcnn_last.pth',
+
+    # ==== NEW default checkpoints for EDSR-lite ====
+    ckpt_best='weights/edsr_lite_best.pth',
+    ckpt_last='weights/edsr_lite_last.pth',
+
+    # ==== OLD names kept for reference ====
+    # ckpt_best='weights/srcnn_best.pth',
+    # ckpt_last='weights/srcnn_last.pth',
+
     num_workers=0,
-    early_stop_patience=5
+    early_stop_patience=5,
+    perc_weight=0.10,     # weight for perceptual loss
 ):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     os.makedirs('weights', exist_ok=True)
@@ -68,9 +86,22 @@ def train(
     dl_train = DataLoader(dtrain, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     dl_val   = DataLoader(dval,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    net = SRCNN().to(device)
+    # ==== NEW MODEL (active) ====
+    net = EDSRLite().to(device)
+
+    # ==== OLD MODEL (kept, commented) ====
+    # net = SRCNN().to(device)
+
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    crit = nn.L1Loss()
+
+    # ==== NEW LOSSES (active): L1 + Perceptual ====
+    crit_l1 = nn.L1Loss()
+    crit_perc = VGGPerceptual(weight=perc_weight).to(device)
+
+    # ==== OLD single L1 loss (kept, commented) ====
+    # crit = nn.L1Loss()
+
+    # AMP + scheduler (version-safe)
     scaler = torch.amp.GradScaler('cuda', enabled=(device=='cuda'))
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=2)
 
@@ -82,18 +113,34 @@ def train(
         net.train()
         t0 = time.time()
         total_loss = 0.0
+
+        pbar = tqdm(dl_train, desc=f"Epoch {ep:02d}/{epochs}", ncols=100)
         for lri, hri in dl_train:
             lri, hri = lri.to(device, non_blocking=True), hri.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(device=='cuda')):
+
+            # ==== NEW: mixed loss with perceptual ====
+            with torch.amp.autocast('cuda', enabled=(device=='cuda')):
                 pred = net(lri)
-                loss = crit(pred, hri)
+                loss_l1 = crit_l1(pred, hri)
+                loss_perc = crit_perc(pred.clamp(0,1), hri)
+                loss = loss_l1 + loss_perc
+            # ==== OLD: pure L1 ====
+            # with torch.cuda.amp.autocast(enabled=(device=='cuda')):
+            #     pred = net(lri)
+            #     loss = crit(pred, hri)
+
             scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
             scaler.step(opt)
             scaler.update()
             total_loss += loss.item() * lri.size(0)
+            last_loss = loss.item()   # <-- save current loss
 
+# update tqdm only if we have a loss
+            if last_loss is not None:
+                pbar.set_postfix({"loss": f"{last_loss:.4f}"})
+                
         train_loss = total_loss / len(dtrain)
 
         # -------- VALIDATE --------
@@ -104,7 +151,12 @@ def train(
             for lri, hri in dl_val:
                 lri, hri = lri.to(device, non_blocking=True), hri.to(device, non_blocking=True)
                 pred = net(lri).clamp(0,1)
-                total_val_loss += crit(pred, hri).item() * lri.size(0)
+
+                # match the training objective on val for scheduler purposes
+                val_l1 = crit_l1(pred, hri).item()
+                val_perc = crit_perc(pred, hri).item()
+                total_val_loss += (val_l1 + val_perc) * lri.size(0)
+
                 total_psnr += psnr(pred, hri) * lri.size(0)
 
         val_loss = total_val_loss / len(dval)
@@ -117,7 +169,7 @@ def train(
         dt = time.time() - t0
         curr_lr = opt.param_groups[0]['lr']
         print(f"Epoch {ep:02d}/{epochs} | "
-              f"train_L1={train_loss:.4f} | val_L1={val_loss:.4f} | val_PSNR={val_psnr:.2f} dB | "
+              f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_PSNR={val_psnr:.2f} dB | "
               f"lr={curr_lr:.1e} | {dt:.1f}s")
 
         # save last
